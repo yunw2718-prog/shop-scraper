@@ -1,7 +1,21 @@
-# translate_images.py
+"""Translate Chinese text in images to Malay using OCR and a transformer.
+
+The script scans all images in an input directory, detects Chinese text with
+Tesseract OCR, translates it to Malay with a HuggingFace transformer model and
+draws the translation back onto the image.  The original layout (font size,
+colour and position) is preserved as much as possible.
+
+Usage:
+    python translate_images.py
+
+Both ``input_images`` and ``output_images`` folders are created automatically
+if they do not exist.
+"""
+
 import os
 import re
 import argparse
+import platform
 from collections import defaultdict
 
 import cv2
@@ -50,6 +64,16 @@ def estimate_text_color(bgr_patch: np.ndarray) -> tuple:
     # BGR->RGB
     r, g, b = int(color[2]), int(color[1]), int(color[0])
     return (r, g, b)
+
+# ---------- 辅助：根据操作系统提供默认字体 ----------
+def default_font_path() -> str:
+    system = platform.system()
+    if system == "Windows":
+        return "C:/Windows/Fonts/arialbd.ttf"
+    if system == "Darwin":  # macOS
+        return "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
+    # Linux 及其他：使用 DejaVu 字体
+    return "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 # ---------- 主处理：一张图 ----------
 def process_one(img_path, out_path, tesseract_cmd=None, font_path=None, translator=None):
@@ -126,11 +150,17 @@ def process_one(img_path, out_path, tesseract_cmd=None, font_path=None, translat
     pil_img = Image.fromarray(cv2.cvtColor(cleaned, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil_img)
 
-    # 字体：若未指定就用系统黑体
+    # 字体：优先使用用户提供，其次使用系统默认字体
     if font_path and os.path.exists(font_path):
         base_font_path = font_path
     else:
-        base_font_path = "C:/Windows/Fonts/arialbd.ttf"
+        base_font_path = default_font_path()
+
+    def load_font(size: int) -> ImageFont.FreeTypeFont:
+        try:
+            return ImageFont.truetype(base_font_path, size)
+        except OSError:
+            return ImageFont.load_default()
 
     for info in line_infos:
         (x1, y1, x2, y2) = info["bbox"]
@@ -152,7 +182,7 @@ def process_one(img_path, out_path, tesseract_cmd=None, font_path=None, translat
         box_h = y2 - y1
         # 字号略小于行高，给行间距留点余量
         font_size = max(12, int(box_h * 0.86))
-        font = ImageFont.truetype(base_font_path, font_size)
+        font = load_font(font_size)
 
         # 文本在框内自动换行：先尝试一行；太宽再按宽度切分
         line = ms.replace("\n", " ").strip()
@@ -166,7 +196,7 @@ def process_one(img_path, out_path, tesseract_cmd=None, font_path=None, translat
                 if total_h <= box_h or font_size <= 12:
                     break
                 font_size = max(12, font_size - 1)
-                font = ImageFont.truetype(base_font_path, font_size)
+                font = load_font(font_size)
 
         # 纵向居中，横向默认左对齐（如果原行特别宽，改为中对齐）
         total_h = len(render_lines) * font_size + max(0, len(render_lines) - 1) * int(0.2 * font_size)
@@ -204,11 +234,20 @@ def main():
 
     in_dir = args.input
     out_dir = args.output
+
+    # Ensure input and output directories exist so the script can run on a
+    # fresh checkout without manual folder creation.
+    os.makedirs(in_dir, exist_ok=True)
     os.makedirs(out_dir, exist_ok=True)
 
-    for name in os.listdir(in_dir):
-        if not name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-            continue
+    # Collect all candidate image files.  If none are found we simply inform
+    # the user and exit gracefully.
+    images = [n for n in os.listdir(in_dir) if n.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))]
+    if not images:
+        print(f"No images found in '{in_dir}'. Add images to translate and rerun.")
+        return
+
+    for name in images:
         process_one(
             os.path.join(in_dir, name),
             os.path.join(out_dir, name),
